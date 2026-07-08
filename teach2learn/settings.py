@@ -29,7 +29,7 @@ load_dotenv(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-*d(h#t9u0li_fq)4gl10$036f1y8b1##b9y(7qko!o@99mr&j7"
+SECRET_KEY = os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -37,6 +37,7 @@ DEBUG = True
 ALLOWED_HOSTS = [
     "127.0.0.1",
     "localhost"
+    "ManasaBhimisetty.pythonanywhere.com",
 ]
 
 
@@ -93,11 +94,11 @@ WSGI_APPLICATION = "teach2learn.wsgi.application"
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'postgres',
-        'USER': 'postgres.dlgwgnqgcvfjsnarpuzf',
-        'PASSWORD': 'Teach2learn@1',
-        'HOST': 'aws-1-ap-south-1.pooler.supabase.com',
-        'PORT': '6543',
+        'NAME': os.getenv("DB_NAME"),
+        'USER': os.getenv("DB_USER"),
+        'PASSWORD': os.getenv("DB_PASSWORD"),
+        'HOST': os.getenv("DB_HOST"),
+        'PORT': os.getenv("DB_PORT"),
     }
 }
 
@@ -142,6 +143,8 @@ STATICFILES_DIRS = [
     BASE_DIR / "static",
 ]
 
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
@@ -149,8 +152,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 
-RAZORPAY_KEY_ID = "rzp_test_T4Yqi3kDoMqTl0"
-RAZORPAY_KEY_SECRET = "b8UyDl34mqlhaiHxHxy3yVQc"
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET")
 PREMIUM_PRICE_RUPEES = 499
 PREMIUM_PRICE_PAISE = 29900
 LOGIN_URL = "login_view"
