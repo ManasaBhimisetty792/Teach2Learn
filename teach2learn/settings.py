@@ -38,6 +38,7 @@ ALLOWED_HOSTS = [
     "127.0.0.1",
     "localhost",
     "ManasaBhimisetty.pythonanywhere.com",
+    ".onrender.com",
 ]
 
 
