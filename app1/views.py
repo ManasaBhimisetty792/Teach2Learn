@@ -39,7 +39,7 @@ import matplotlib.pyplot as plt
 
 
 genai.configure(
-    api_key="YOUR_GEMINI_API_KEY"
+    api_key=os.getenv("GEMINI_API_KEY")
 )
 
 model = genai.GenerativeModel(
