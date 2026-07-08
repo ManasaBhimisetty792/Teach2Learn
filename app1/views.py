@@ -1,64 +1,62 @@
-from django.shortcuts import render, redirect
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.core.exceptions import MultipleObjectsReturned
-from google.oauth2 import id_token
-from google.auth.transport import requests
-from django.core.paginator import Paginator
-from .models import UserProfile
-from django.contrib.auth import authenticate, login, logout
-from django.contrib import messages
-from django.contrib.auth.models import User
-from .models import Profile
-from .models import ContactMessage
-import json
+# Standard library imports
 import csv
-from django.conf import settings
-from django.contrib.auth.models import User
-from django.contrib.auth import login
-
-from django.conf import settings as django_settings
-from django.contrib.auth.decorators import login_required
-from django.shortcuts import render, get_object_or_404
-from django.contrib.auth.hashers import make_password, check_password
-from django.views.decorators.csrf import ensure_csrf_cookie
-from django.middleware.csrf import get_token
-from django.core.files.storage import FileSystemStorage
-from reportlab.pdfgen import canvas
-from django.http import HttpResponse
+import json
 import os
-from .supabase_client import supabase
-from app1.supabase_client import supabase
-from datetime import datetime
+from collections import Counter, OrderedDict
+from datetime import datetime, timedelta, timezone
+
+# Third-party imports
 import google.generativeai as genai
-from collections import Counter
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import razorpay
+from reportlab.pdfgen import canvas
+from supabase import create_client
+
+# Django imports
+from django.conf import settings
+from django.contrib import messages
+from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.hashers import check_password, make_password
+from django.contrib.auth.models import User
+from django.core.exceptions import MultipleObjectsReturned
+from django.core.files.storage import FileSystemStorage
+from django.core.paginator import Paginator
+from django.http import HttpResponse, JsonResponse
+from django.middleware.csrf import get_token
+from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone as django_timezone
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
+from google.auth.transport import requests
+from google.oauth2 import id_token
+
+# Local app imports
+from .models import ContactMessage, Profile, UserProfile
+from .supabase_client import supabase
 
 
-genai.configure(
-    api_key=os.getenv("GEMINI_API_KEY")
-)
+# Configure matplotlib
+matplotlib.use("Agg")
 
-model = genai.GenerativeModel(
-    "gemini-1.5-flash"
-)
+# Configure Gemini AI
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel("gemini-1.5-flash")
 
+
+# ======================== Helper Functions ========================
 
 def normalize_skills(skills):
+    """Normalize skills from various formats into a list."""
     if not skills:
         return []
     if isinstance(skills, list):
         return [skill.strip() for skill in skills if skill and skill.strip()]
-    return [
-        skill.strip()
-        for skill in skills.split(",")
-        if skill.strip()
-    ]
+    return [skill.strip() for skill in skills.split(",") if skill.strip()]
 
 
 def get_learn_skills_from_session(request):
+    """Retrieve learn skills from session."""
     learn_skills = request.session.get("learn_skills")
     if learn_skills:
         return normalize_skills(learn_skills)
@@ -70,6 +68,7 @@ def get_learn_skills_from_session(request):
 
 
 def format_supabase_error(error_message):
+    """Format Supabase error messages for user display."""
     if "row-level security policy" in error_message.lower():
         return (
             "Supabase blocked the save (Row Level Security). "
@@ -94,55 +93,140 @@ def format_supabase_error(error_message):
     return f"Could not save: {error_message}"
 
 
+def build_image_url(image_path):
+    """Build image URL from storage path."""
+    if not image_path:
+        return None
+    if image_path.startswith(("http://", "https://")):
+        return image_path
+    return settings.MEDIA_URL + image_path.lstrip("/")
+
+
+def get_profile_by_email(other_email):
+    """Retrieve profile data by email."""
+    if not other_email:
+        return None
+
+    result = (
+        supabase.table("app1_profile")
+        .select(
+            "id, email, full_name, professional_title, location, bio, "
+            "profile_image, learn_skills, teach_skills, education, experience, achievements"
+        )
+        .eq("email", other_email)
+        .maybe_single()
+        .execute()
+    )
+    profile = result.data
+    if profile:
+        profile["profile_image_url"] = build_image_url(profile.get("profile_image"))
+    return profile
+
+
+def attach_profile_ids(rows, email_field):
+    """Attach profile information to connection rows."""
+    updated = []
+    for row in rows:
+        other_email = row.get(email_field)
+        other_profile = get_profile_by_email(other_email)
+        row["other_profile"] = other_profile
+        row["other_profile_id"] = other_profile.get("id") if other_profile else None
+        updated.append(row)
+    return updated
+
+
+def create_notification(
+    user_email,
+    title,
+    message,
+    notification_type,
+    sender_email=None,
+    connection_id=None,
+    skill=None,
+    file_url=None,
+    deadline=None,
+    session_date=None,
+    session_time=None,
+    end_time=None,
+    meeting_link=None,
+    rating=None,
+    review=None,
+):
+    """Create a notification in Supabase."""
+    payload = {
+        "user_email": user_email,
+        "title": title,
+        "message": message,
+        "type": notification_type,
+        "status": "unread",
+    }
+
+    if sender_email:
+        payload["sender_email"] = sender_email
+    if connection_id:
+        payload["connection_id"] = connection_id
+    if skill:
+        payload["skill"] = skill
+    if file_url:
+        payload["file_url"] = file_url
+    if deadline:
+        payload["deadline"] = deadline
+    if session_date:
+        payload["session_date"] = session_date
+    if session_time:
+        payload["session_time"] = session_time
+    if end_time:
+        payload["end_time"] = end_time
+    if meeting_link:
+        payload["meeting_link"] = meeting_link
+    if rating is not None:
+        payload["rating"] = rating
+    if review:
+        payload["review"] = review
+
+    return supabase.table("notifications").insert(payload).execute()
+
+
+# ======================== Public Views ========================
 
 def home(request):
+    """Render home page."""
     print(request.user)
     print(request.user.is_authenticated)
+    return render(request, "public/home.html")
 
-    return render(request, 'public/home.html')
 
 def about(request):
-    return render(request,'public/about.html')
+    """Render about page."""
+    return render(request, "public/about.html")
+
 
 def howitworks(request):
-    return render(request,'public/howitworks.html')
+    """Render how it works page."""
+    return render(request, "public/howitworks.html")
+
 
 def pricing(request):
-    return render(request,'public/pricing.html')
+    """Render pricing page with Razorpay integration."""
+    amount = 299
+    client = razorpay.Client(
+        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+    )
+    razorpay_order = client.order.create({
+        "amount": amount,
+        "currency": "INR",
+        "receipt": "receipt_order_1",
+    })
+    return render(request, "public/pricing.html", {
+        "razorpay_key": settings.RAZORPAY_KEY_ID,
+        "amount": amount,
+        "order_id": razorpay_order["id"],
+        "currency": "INR",
+    })
 
-# def register_view(request):
-#     if request.method == "POST":
-#         username = request.POST.get("username")
-#         email = request.POST.get("email")
-#         password = request.POST.get("password")
-
-#         user = User.objects.create_user(
-#             username=username,
-#             email=email,
-#             password=password
-#         )
-
-#         Profile.objects.get_or_create(
-#             user=user,
-#             defaults={
-#                 "full_name": username,
-#                 "email": email,
-#                 "is_premium": False,
-#                 "premium_plan": "free"
-#             }
-#         )
-
-#         login(request, user)
-#         return redirect("login_view")
-
-#     return render(request, "public/register.html")
-
-from django.shortcuts import render, redirect
-from django.contrib.auth.models import User
-
-from .models import Profile
 
 def register_view(request):
+    """Handle user registration."""
     if request.method == "POST":
         username = request.POST.get("username")
         email = request.POST.get("email")
@@ -150,7 +234,11 @@ def register_view(request):
         confirm_password = request.POST.get("confirm_password")
 
         if password != confirm_password:
-            return render(request, "public/register.html", {"error": "Passwords do not match"})
+            return render(
+                request,
+                "public/register.html",
+                {"error": "Passwords do not match"}
+            )
 
         user = User.objects.create_user(
             username=username,
@@ -173,8 +261,10 @@ def register_view(request):
 
     return render(request, "public/register.html")
 
+
 @csrf_exempt
 def login_view(request):
+    """Handle user login."""
     if request.method == "POST":
         email = request.POST.get("email")
         password = request.POST.get("password")
@@ -208,11 +298,56 @@ def login_view(request):
             messages.error(request, "Multiple accounts found with this email")
     return render(request, "public/login.html")
 
+
+@csrf_exempt
+def google_login(request):
+    """Handle Google OAuth login."""
+    if request.method != "POST":
+        return JsonResponse({"success": False}, status=400)
+
+    try:
+        data = json.loads(request.body)
+        credential = data.get("credential")
+
+        CLIENT_ID = (
+            "534088856082-fmbpmuvqchgqe6vp1be83v9uu87t8ft2.apps.googleusercontent.com"
+        )
+
+        user_info = id_token.verify_oauth2_token(
+            credential,
+            requests.Request(),
+            CLIENT_ID
+        )
+
+        email = user_info["email"]
+        full_name = user_info.get("name", "")
+
+        user, created = User.objects.get_or_create(
+            email=email,
+            defaults={"username": email}
+        )
+
+        login(request, user)
+
+        return JsonResponse({"success": True})
+
+    except Exception as e:
+        return JsonResponse({
+            "success": False,
+            "error": str(e)
+        })
+
+
+def logout_view(request):
+    """Handle user logout."""
+    logout(request)
+    return redirect("home")
+
+
 @login_required
 def contact(request):
-
+    """Handle contact form submission."""
     if request.method == "POST":
-
         ContactMessage.objects.create(
             name=request.POST.get("name"),
             email=request.POST.get("email"),
@@ -228,181 +363,19 @@ def contact(request):
 
     return render(request, "public/contact.html", context)
 
-@csrf_exempt
-def google_login(request):
 
-    if request.method != "POST":
-        return JsonResponse(
-            {"success": False},
-            status=400
-        )
-
-    try:
-
-        data = json.loads(request.body)
-
-        credential = data.get("credential")
-
-        CLIENT_ID = (
-            "534088856082-fmbpmuvqchgqe6vp1be83v9uu87t8ft2.apps.googleusercontent.com"
-        )
-
-        user_info = id_token.verify_oauth2_token(
-            credential,
-            requests.Request(),
-            CLIENT_ID
-        )
-
-        email = user_info["email"]
-
-        full_name = user_info.get("name", "")
-
-        user, created = User.objects.get_or_create(
-            email=email,
-            defaults={
-                "username": email
-            }
-        )
-
-        login(request, user)
-
-        return JsonResponse({
-            "success": True
-        })
-
-    except Exception as e:
-
-        return JsonResponse({
-            "success": False,
-            "error": str(e)
-        })
-
-def logout_view(request):
-    logout(request)
-    return redirect('home')
-
-@login_required(login_url="login_view")
-def dashboard(request):
-
-    email = request.user.email
-
-    # Logged-in user's profile
-    profile = (
-        supabase.table("app1_profile")
-        .select("*")
-        .eq("email", email)
-        .maybe_single()
-        .execute()
-    ).data
-
-    if not profile:
-        return redirect("editProfile")
-
-    my_teach = set(profile.get("teach_skills") or [])
-    my_learn = set(profile.get("learn_skills") or [])
-
-    # ---------------- Match Suggestions ----------------
-    profiles = (
-        supabase.table("app1_profile")
-        .select("*")
-        .neq("email", email)
-        .execute()
-    ).data or []
-
-    matched_users = []
-
-    for p in profiles:
-
-        other_teach = set(p.get("teach_skills") or [])
-        other_learn = set(p.get("learn_skills") or [])
-
-        learn_matches = my_learn & other_teach
-        teach_matches = my_teach & other_learn
-
-        matches = len(learn_matches) + len(teach_matches)
-        total = len(my_teach) + len(my_learn)
-
-        percent = int((matches / total) * 100) if total else 0
-
-        if percent > 0:
-
-            matched_users.append({
-                "id": p.get("id"),
-                "name": p.get("full_name"),
-                "profile_image_url": p.get("profile_image"),
-                "skills": list(learn_matches | teach_matches),
-                "match": percent,
-            })
-
-    matched_users = sorted(
-        matched_users,
-        key=lambda x: x["match"],
-        reverse=True
-    )[:5]
-
-    # ---------------- Previous Matches ----------------
-    connections = (
-        supabase.table("connections")
-        .select("*")
-        .eq("status", "accepted")
-        .or_(f"sender_email.eq.{email},receiver_email.eq.{email}")
-        .execute()
-    ).data or []
-
-    previous_matches = []
-
-    for conn in connections:
-
-        # Get the other user's email
-        if conn["sender_email"] == email:
-            other_email = conn["receiver_email"]
-        else:
-            other_email = conn["sender_email"]
-
-        profile_result = (
-            supabase.table("app1_profile")
-            .select("full_name, profile_image, teach_skills")
-            .eq("email", other_email)
-            .maybe_single()
-            .execute()
-        )
-
-        if profile_result.data:
-
-            p = profile_result.data
-
-            previous_matches.append({
-                "name": p.get("full_name"),
-                "email": other_email,
-                "profile_image": p.get("profile_image"),
-                "teach_skills": p.get("teach_skills") or [],
-            })
-
-    # ---------------- Statistics ----------------
-    total_teach = len(my_teach)
-    total_learn = len(my_learn)
-    total_skills = total_teach + total_learn
-
-    context = {
-        "profile": profile,
-        "matched_users": matched_users,
-        "previous_matches": previous_matches,
-        "teach_skills": list(my_teach),
-        "learn_skills": list(my_learn),
-        "total_skills": total_skills,
-        "teach_count": total_teach,
-        "learn_count": total_learn,
-    }
-
-    return render(request, "user/dashboard.html", context)
+# ======================== User Profile Views ========================
 
 @login_required
 def profile(request):
+    """Display user profile."""
     profile, created = Profile.objects.get_or_create(user=request.user)
-    return render(request, 'user/profile.html', {'profile': profile})
+    return render(request, "user/profile.html", {"profile": profile})
+
 
 @login_required
 def editProfile(request):
+    """Edit user profile."""
     profile, created = Profile.objects.get_or_create(
         user=request.user,
         defaults={
@@ -445,17 +418,144 @@ def editProfile(request):
 
     return render(request, "user/editProfile.html", {"profile": profile})
 
+
 def certifications(request):
-    return render(request,'user/certifications.html')
+    """Display certifications page."""
+    return render(request, "user/certifications.html")
+
+
+# ======================== Dashboard and Matching Views ========================
+
+@login_required(login_url="login_view")
+def dashboard(request):
+    """Display user dashboard with matched users."""
+    email = request.user.email
+
+    # Logged-in user's profile
+    profile = (
+        supabase.table("app1_profile")
+        .select("*")
+        .eq("email", email)
+        .maybe_single()
+        .execute()
+    ).data
+
+    if not profile:
+        return redirect("editProfile")
+
+    my_teach = set(profile.get("teach_skills") or [])
+    my_learn = set(profile.get("learn_skills") or [])
+
+    # Match Suggestions
+    profiles = (
+        supabase.table("app1_profile")
+        .select("*")
+        .neq("email", email)
+        .execute()
+    ).data or []
+
+    matched_users = []
+
+    for p in profiles:
+        other_teach = set(p.get("teach_skills") or [])
+        other_learn = set(p.get("learn_skills") or [])
+
+        learn_matches = my_learn & other_teach
+        teach_matches = my_teach & other_learn
+
+        matches = len(learn_matches) + len(teach_matches)
+        total = len(my_teach) + len(my_learn)
+
+        percent = int((matches / total) * 100) if total else 0
+
+        if percent > 0:
+            matched_users.append({
+                "id": p.get("id"),
+                "name": p.get("full_name"),
+                "profile_image_url": p.get("profile_image"),
+                "skills": list(learn_matches | teach_matches),
+                "match": percent,
+            })
+
+    matched_users = sorted(
+        matched_users,
+        key=lambda x: x["match"],
+        reverse=True
+    )[:5]
+
+    # Previous Matches
+    connections = (
+        supabase.table("connections")
+        .select("*")
+        .eq("status", "accepted")
+        .or_(f"sender_email.eq.{email},receiver_email.eq.{email}")
+        .execute()
+    ).data or []
+
+    previous_matches = []
+
+    for conn in connections:
+        if conn["sender_email"] == email:
+            other_email = conn["receiver_email"]
+        else:
+            other_email = conn["sender_email"]
+
+        profile_result = (
+            supabase.table("app1_profile")
+            .select("full_name, profile_image, teach_skills")
+            .eq("email", other_email)
+            .maybe_single()
+            .execute()
+        )
+
+        if profile_result.data:
+            p = profile_result.data
+            previous_matches.append({
+                "name": p.get("full_name"),
+                "email": other_email,
+                "profile_image": p.get("profile_image"),
+                "teach_skills": p.get("teach_skills") or [],
+            })
+
+    # Statistics
+    total_teach = len(my_teach)
+    total_learn = len(my_learn)
+    total_skills = total_teach + total_learn
+
+    context = {
+        "profile": profile,
+        "matched_users": matched_users,
+        "previous_matches": previous_matches,
+        "teach_skills": list(my_teach),
+        "learn_skills": list(my_learn),
+        "total_skills": total_skills,
+        "teach_count": total_teach,
+        "learn_count": total_learn,
+    }
+
+    return render(request, "user/dashboard.html", context)
+
+
+def normalize_list(value):
+    """Normalize value to list format."""
+    if not value:
+        return []
+
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(",") if v.strip()]
+
+    return []
 
 
 @login_required
 def matches(request):
+    """Find skill matches for the user."""
     email = request.user.email
 
-    # -----------------------------
     # Current User Profile
-    # -----------------------------
     profile_result = (
         supabase.table("app1_profile")
         .select("*")
@@ -466,19 +566,6 @@ def matches(request):
 
     profile = profile_result.data if profile_result.data else {}
 
-    # Convert comma-separated strings/lists into Python lists
-    def normalize_list(value):
-        if not value:
-            return []
-
-        if isinstance(value, list):
-            return [str(v).strip() for v in value if str(v).strip()]
-
-        if isinstance(value, str):
-            return [v.strip() for v in value.split(",") if v.strip()]
-
-        return []
-
     profile["teach_skills"] = normalize_list(profile.get("teach_skills"))
     profile["learn_skills"] = normalize_list(profile.get("learn_skills"))
 
@@ -488,9 +575,7 @@ def matches(request):
     else:
         profile["profile_image_url"] = None
 
-    # -----------------------------
     # Search Skill
-    # -----------------------------
     search_skill = request.GET.get("skill", "").strip().lower()
 
     if not search_skill:
@@ -505,9 +590,7 @@ def matches(request):
             }
         )
 
-    # -----------------------------
     # Get all users
-    # -----------------------------
     result = (
         supabase.table("app1_profile")
         .select("*")
@@ -520,11 +603,8 @@ def matches(request):
     # Current user's learn skills
     learner_skills = [s.lower() for s in profile.get("learn_skills", [])]
 
-    # -----------------------------
     # Match Users
-    # -----------------------------
     for m in members:
-
         # Skip current user
         if m.get("email") == email:
             continue
@@ -538,9 +618,7 @@ def matches(request):
         if search_skill not in mentor_skills:
             continue
 
-        # -----------------------------
         # Skill Match
-        # -----------------------------
         matched_skills = set(learner_skills).intersection(set(mentor_skills))
         matched_count = len(matched_skills)
 
@@ -549,9 +627,7 @@ def matches(request):
         else:
             skill_percentage = 0
 
-        # -----------------------------
         # Average Rating
-        # -----------------------------
         rating_result = (
             supabase.table("connections")
             .select("rating")
@@ -567,17 +643,12 @@ def matches(request):
         ]
 
         avg_rating = sum(ratings) / len(ratings) if ratings else 0
-
         rating_percentage = (avg_rating / 5) * 100
 
-        # -----------------------------
         # Overall Match
-        # -----------------------------
         final_score = (skill_percentage + rating_percentage) / 2
 
-        # -----------------------------
         # Profile Image
-        # -----------------------------
         image_name = m.get("profile_image")
 
         if image_name:
@@ -594,9 +665,7 @@ def matches(request):
 
         matched_members.append(m)
 
-    # -----------------------------
     # Sort by Overall Match
-    # -----------------------------
     matched_members.sort(
         key=lambda x: x["match_score"],
         reverse=True
@@ -619,18 +688,8 @@ def matches(request):
     )
 
 
-from django.shortcuts import render
-from django.contrib.auth.decorators import login_required
-
-from django.contrib.auth.decorators import login_required
-from django.shortcuts import render
-from django.conf import settings
-from django.contrib.auth.decorators import login_required
-from django.shortcuts import render
-from django.conf import settings
-
-# @login_required
 def member_profile(request, id):
+    """Display member profile."""
     profile_result = supabase.table("app1_profile").select("*").eq("id", id).single().execute()
     profile_data = profile_result.data or {}
 
@@ -662,39 +721,6 @@ def member_profile(request, id):
         )
         if rating_result.data:
             latest_rating = rating_result.data[0]
-
-    def build_image_url(image_path):
-        if not image_path:
-            return None
-        if image_path.startswith(("http://", "https://")):
-            return image_path
-        return settings.MEDIA_URL + image_path.lstrip("/")
-
-    def get_profile_by_email(other_email):
-        if not other_email:
-            return None
-
-        result = (
-            supabase.table("app1_profile")
-            .select("id, email, full_name, professional_title, location, bio, profile_image, learn_skills, teach_skills, education, experience, achievements")
-            .eq("email", other_email)
-            .maybe_single()
-            .execute()
-        )
-        profile = result.data
-        if profile:
-            profile["profile_image_url"] = build_image_url(profile.get("profile_image"))
-        return profile
-
-    def attach_profile_ids(rows, email_field):
-        updated = []
-        for row in rows:
-            other_email = row.get(email_field)
-            other_profile = get_profile_by_email(other_email)
-            row["other_profile"] = other_profile
-            row["other_profile_id"] = other_profile.get("id") if other_profile else None
-            updated.append(row)
-        return updated
 
     teaching = (
         supabase.table("connections")
@@ -774,6 +800,7 @@ def member_profile(request, id):
 
 @login_required
 def member_profile1(request, id):
+    """Display member profile for logged-in users."""
     profile_result = supabase.table("app1_profile").select("*").eq("id", id).single().execute()
     profile_data = profile_result.data or {}
 
@@ -805,39 +832,6 @@ def member_profile1(request, id):
         )
         if rating_result.data:
             latest_rating = rating_result.data[0]
-
-    def build_image_url(image_path):
-        if not image_path:
-            return None
-        if image_path.startswith(("http://", "https://")):
-            return image_path
-        return settings.MEDIA_URL + image_path.lstrip("/")
-
-    def get_profile_by_email(other_email):
-        if not other_email:
-            return None
-
-        result = (
-            supabase.table("app1_profile")
-            .select("id, email, full_name, professional_title, location, bio, profile_image, learn_skills, teach_skills, education, experience, achievements")
-            .eq("email", other_email)
-            .maybe_single()
-            .execute()
-        )
-        profile = result.data
-        if profile:
-            profile["profile_image_url"] = build_image_url(profile.get("profile_image"))
-        return profile
-
-    def attach_profile_ids(rows, email_field):
-        updated = []
-        for row in rows:
-            other_email = row.get(email_field)
-            other_profile = get_profile_by_email(other_email)
-            row["other_profile"] = other_profile
-            row["other_profile_id"] = other_profile.get("id") if other_profile else None
-            updated.append(row)
-        return updated
 
     teaching = (
         supabase.table("connections")
@@ -914,56 +908,12 @@ def member_profile1(request, id):
         "completed_connections": completed,
     })
 
-def assignments(request):
-    return render(request,'user/assignments.html')
 
-def chat(request):
-    return render(request,'user/chat.html')
-
-def interview(request):
-    return render(request,'user/interview.html')
-
-def progress(request):
-    return render(request,'user/progress.html')
-
-def sessions(request):
-    return render(request,'user/sessions.html')
-
-def usersubscriptions(request):
-    return render(request,'user/usersubscriptions.html')
-
-# ADMIN DASHBOARD SECTION
-
-def admindashboard(request):
-    return render(request,'admin/admin-dashboard.html')
-
-def usermanagement(request):
-    return render(request,'admin/user-management.html')
-
-def skillmanagement(request):
-    return render(request,'admin/skill-management.html')
-
-def subscriptions(request):
-    return render(request,'admin/subscriptions.html')
-
-def analytics(request):
-    return render(
-        request,
-        "admin/analytics.html",
-    )
-def support(request):
-    return render(request,'admin/support-feedback.html')
-
-def rating(request):
-    return render(request,'user/rating.html')
-
-
-from django.contrib.auth.decorators import login_required
-from django.shortcuts import redirect
-from django.contrib import messages
+# ======================== Connection and Matching Views ========================
 
 @login_required
 def send_request(request, member_id):
+    """Send a connection request to another user."""
     sender_email = request.user.email
     skill = request.POST.get("skill")
 
@@ -1059,8 +1009,10 @@ def send_request(request, member_id):
     messages.success(request, "Connection request sent successfully.")
     return redirect("matches")
 
+
 @login_required
 def connection_requests(request):
+    """Display pending connection requests."""
     email = request.user.email
     result = (
         supabase
@@ -1072,9 +1024,81 @@ def connection_requests(request):
     )
     return render(request, "user/requests.html", {"requests": result.data})
 
+
+@login_required
+def accept_request(request, request_id):
+    """Accept a connection request."""
+    connection = (
+        supabase.table("connections")
+        .select("*")
+        .eq("id", request_id)
+        .maybe_single()
+        .execute()
+    )
+
+    if not connection.data:
+        return redirect("notifications")
+
+    request_data = connection.data
+    skill = request_data.get("skill")
+
+    supabase.table("connections").update({
+        "status": "accepted"
+    }).eq("id", request_id).execute()
+
+    supabase.table("notifications").insert({
+        "user_email": request_data["sender_email"],
+        "title": "Connection Accepted",
+        "message": f"{request_data['receiver_email']} accepted your request to learn {skill}",
+        "type": "ACCEPTED",
+        "status": "unread",
+        "connection_id": request_id
+    }).execute()
+
+    return redirect("notifications")
+
+
+@login_required
+def reject_request(request, request_id):
+    """Reject a connection request."""
+    connection = (
+        supabase.table("connections")
+        .select("*")
+        .eq("id", request_id)
+        .maybe_single()
+        .execute()
+    )
+
+    if not connection.data:
+        return redirect("notifications")
+
+    request_data = connection.data
+
+    supabase.table("connections").update({
+        "status": "rejected"
+    }).eq("id", request_id).execute()
+
+    supabase.table("notifications").update({
+        "status": "read"
+    }).eq("connection_id", request_id).execute()
+
+    create_notification(
+        user_email=request_data["sender_email"],
+        title="Connection Rejected",
+        message="Your connection request was rejected.",
+        notification_type="REJECTED",
+        sender_email=request_data["receiver_email"],
+        connection_id=request_id
+    )
+
+    return redirect("notifications")
+
+
+# ======================== Notification Views ========================
+
 @login_required
 def notifications(request):
-
+    """Display user notifications."""
     email = request.user.email
 
     # Mark all notifications as read
@@ -1095,10 +1119,8 @@ def notifications(request):
 
     # Process each notification
     for n in notifications:
-
         # Request notifications
         if n.get("type") == "REQUEST" and n.get("connection_id"):
-
             connection_result = (
                 supabase.table("connections")
                 .select("status, mentor_email, learner_email, completed")
@@ -1119,7 +1141,6 @@ def notifications(request):
 
         # Session notifications
         if n.get("type") == "SESSION" and n.get("connection_id"):
-
             session_result = (
                 supabase.table("sessions")
                 .select("skill, session_date, session_time, end_time, meeting_link")
@@ -1173,161 +1194,24 @@ def notifications(request):
             "connected_users": [],
         },
     )
-@login_required
-def accept_request(request, request_id):
-    connection = (
-        supabase.table("connections")
-        .select("*")
-        .eq("id", request_id)
-        .maybe_single()
-        .execute()
-    )
 
-    if not connection.data:
-        return redirect("notifications")
 
-    request_data = connection.data
-    skill = request_data.get("skill")
-
-    supabase.table("connections").update({
-        "status": "accepted"
-    }).eq("id", request_id).execute()
-
-    supabase.table("notifications").insert({
-        "user_email": request_data["sender_email"],
-        "title": "Connection Accepted",
-        "message": f"{request_data['receiver_email']} accepted your request to learn {skill}",
-        "type": "ACCEPTED",
-        "status": "unread",
-        "connection_id": request_id
-    }).execute()
-
-    return redirect("notifications")
-
-@login_required
-def reject_request(request, request_id):
-    connection = (
-        supabase.table("connections")
-        .select("*")
-        .eq("id", request_id)
-        .maybe_single()
-        .execute()
-    )
-
-    if not connection.data:
-        return redirect("notifications")
-
-    request_data = connection.data
-
-    supabase.table("connections").update({
-        "status": "rejected"
-    }).eq("id", request_id).execute()
-
-    supabase.table("notifications").update({
-        "status": "read"
-    }).eq("connection_id", request_id).execute()
-
-    create_notification(
-        user_email=request_data["sender_email"],
-        title="Connection Rejected",
-        message="Your connection request was rejected.",
-        notification_type="REJECTED",
-        sender_email=request_data["receiver_email"],
-        connection_id=request_id
-    )
-
-    return redirect("notifications")
-
-def create_notification(
-    user_email,
-    title,
-    message,
-    notification_type,
-    sender_email=None,
-    connection_id=None,
-    skill=None,
-    file_url=None,
-    deadline=None,
-    session_date=None,
-    session_time=None,
-    end_time=None,
-    meeting_link=None,
-    rating=None,
-    review=None,
-):
-    payload = {
-        "user_email": user_email,
-        "title": title,
-        "message": message,
-        "type": notification_type,
-        "status": "unread",
-    }
-
-    if sender_email:
-        payload["sender_email"] = sender_email
-    if connection_id:
-        payload["connection_id"] = connection_id
-    if skill:
-        payload["skill"] = skill
-    if file_url:
-        payload["file_url"] = file_url
-    if deadline:
-        payload["deadline"] = deadline
-    if session_date:
-        payload["session_date"] = session_date
-
-    if session_time:
-        payload["session_time"] = session_time
-
-    if end_time:
-        payload["end_time"] = end_time
-
-    if meeting_link:
-        payload["meeting_link"] = meeting_link
-
-    if rating is not None:
-        payload["rating"] = rating
-    
-    if review:
-        payload["review"] = review
-
-    return (
-        supabase
-        .table("notifications")
-        .insert(payload)
-        .execute()
-    )
-
-    
 @login_required
 def mark_notification_read(request):
-    """Mark ALL notifications as read - returns JSON to update UI"""
+    """Mark all notifications as read."""
     email = request.user.email
-    
+
     supabase.table("notifications").update({
         "status": "read"
     }).eq("user_email", email).execute()
-    
+
     return JsonResponse({"success": True, "count": 0})
 
-def send_message(request):
-    
-    sender = request.session["profile"]["email"]
-    receiver = request.POST["receiver"]
-    message = request.POST["message"]
 
-    supabase.table("messages").insert({
-        "sender_email": sender,
-        "receiver_email": receiver,
-        "message": message
-    }).execute()
-
-    return redirect("chat_with_user", email=receiver)
-
-
-from django.core.files.storage import FileSystemStorage
+# ======================== Chat and Messaging Views ========================
 
 def chat(request, email=None):
+    """Handle chat and file uploads."""
     if not request.user.is_authenticated:
         return redirect("login_view")
 
@@ -1418,7 +1302,7 @@ def chat(request, email=None):
 
             return redirect("chat_with_user", email=email)
 
-    messages = []
+    chat_messages = []
     if email:
         result = (
             supabase.table("messages")
@@ -1430,188 +1314,26 @@ def chat(request, email=None):
             .order("created_at")
             .execute()
         )
-        messages = result.data or []
+        chat_messages = result.data or []
 
     return render(
         request,
         "user/chat.html",
         {
-            "messages": messages,
+            "messages": chat_messages,
             "receiver": selected_user,
         }
     )
 
 
-# razorpay
-
-import razorpay
-from django.conf import settings
-from django.utils import timezone
-from .decorators import premium_required
-@login_required
-def premium_page(request):
-    profile, _ = Profile.objects.get_or_create(
-        user=request.user,
-        defaults={
-            "full_name": request.user.get_full_name() or request.user.username,
-            "email": request.user.email,
-        }
-    )
-
-    if profile.is_premium:
-        return redirect("premium_dashboard")
-
-    client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
-
-    order_data = {
-        "amount": settings.PREMIUM_PRICE_PAISE,
-        "currency": "INR",
-        "payment_capture": 1
-    }
-
-    order = client.order.create(data=order_data)
-
-    profile.razorpay_order_id = order["id"]
-    profile.premium_amount = settings.PREMIUM_PRICE_RUPEES
-    profile.save()
-
-    context = {
-        "profile": profile,
-        "razorpay_key": settings.RAZORPAY_KEY_ID,
-        "order_id": order["id"],
-        "amount": settings.PREMIUM_PRICE_PAISE,
-        "display_amount": settings.PREMIUM_PRICE_RUPEES,
-        "user_name": profile.full_name or request.user.username,
-        "user_email": request.user.email,
-    }
-    return render(request, "user/premium_payment.html", context)
-
-client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
-
-
-@login_required(login_url='login_view')
-def premium_chat(request):
-    profile, _ = Profile.objects.get_or_create(user=request.user)
-
-    if not profile.is_premium:
-        messages.error(request, "This feature is available only for premium users.")
-        return redirect("premium_page")
-
-    return render(request, "user/premium_chat.html")
-
-client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
-
-@csrf_exempt
-def verify_razorpay_payment(request):
-    if request.method != "POST":
-        return JsonResponse({"success": False, "message": "Invalid request"}, status=405)
-
-    data = json.loads(request.body)
-
-    razorpay_order_id = data.get("razorpay_order_id")
-    razorpay_payment_id = data.get("razorpay_payment_id")
-    razorpay_signature = data.get("razorpay_signature")
-
-    client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
-
-    try:
-        client.utility.verify_payment_signature({
-            "razorpay_order_id": razorpay_order_id,
-            "razorpay_payment_id": razorpay_payment_id,
-            "razorpay_signature": razorpay_signature
-        })
-        return JsonResponse({"success": True, "message": "Payment verified successfully"})
-    except Exception as e:
-        return JsonResponse({"success": False, "message": str(e)}, status=400)
-
-@login_required
-def create_order(request):
-
-    request.session["payment_user_email"] = request.user.email
-    print("Saved Email:", request.session["payment_user_email"])
-
-    amount = 299
-
-    order = client.order.create({
-        "amount": amount * 100,
-        "currency": "INR",
-        "receipt": f"receipt_{request.user.id}",
-    })
-
-    return JsonResponse({
-        "success": True,
-        "order_id": order["id"],
-        "amount": amount * 100,
-        "currency": "INR",
-        "key": settings.RAZORPAY_KEY_ID,
-    })
-
-client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
-
-def pricing(request):
-    amount = 299
-    razorpay_order = client.order.create({
-        "amount": amount,
-        "currency": "INR",
-        "receipt": "receipt_order_1",
-    })
-    return render(request, "public/pricing.html", {
-        "razorpay_key": settings.RAZORPAY_KEY_ID,
-        "amount": amount,
-        "order_id": razorpay_order["id"],
-        "currency": "INR",
-    })
-
-
-
-from django.contrib import messages
-from django.utils import timezone
-from razorpay.errors import SignatureVerificationError
-
-    
-from django.contrib.auth.decorators import login_required
-from django.shortcuts import redirect
-from django.contrib import messages
-
-
-    
-@login_required(login_url="login_view")
-def payment_success(request):
-    email = request.user.email
-
-    try:
-        response = (
-            supabase.table("app1_profile")
-            .update({
-                "is_premium": True,
-                "premium_amount": 299,
-                "premium_plan": "premium"
-            })
-            .eq("email", email)
-            .select("id, email, is_premium, premium_amount, premium_plan")
-            .execute()
-        )
-
-        return redirect("dashboard")
-
-    except Exception as e:
-        print("Payment update failed:", str(e))
-        return redirect("dashboard")
-
-
-from datetime import datetime, timedelta
-from django.contrib import messages
-from django.contrib.auth.decorators import login_required
-from django.shortcuts import render, redirect
-
+# ======================== Sessions and Courses Views ========================
 
 @login_required
 def sessions(request, connection_id=None):
-
+    """Schedule and manage learning sessions."""
     connection = None
 
     if connection_id is not None:
-
         result = (
             supabase.table("connections")
             .select("*")
@@ -1627,7 +1349,6 @@ def sessions(request, connection_id=None):
             return redirect("notifications")
 
     if request.method == "POST":
-
         if connection_id is None or not connection:
             messages.error(request, "Invalid connection.")
             return redirect("notifications")
@@ -1711,20 +1432,10 @@ def sessions(request, connection_id=None):
         },
     )
 
-from django.contrib.auth.decorators import login_required
-from django.shortcuts import redirect
-from django.contrib import messages
-from datetime import datetime
-
-
-from django.contrib.auth.decorators import login_required
-from django.shortcuts import redirect
-from django.contrib import messages
-from datetime import datetime
 
 @login_required
 def complete_course(request, connection_id):
-
+    """Mark a course as completed."""
     email = request.user.email
 
     result = (
@@ -1756,9 +1467,7 @@ def complete_course(request, connection_id):
     (
         supabase
         .table("connections")
-        .update({
-            "completed": True
-        })
+        .update({"completed": True})
         .eq("id", connection_id)
         .execute()
     )
@@ -1775,30 +1484,191 @@ def complete_course(request, connection_id):
     )
 
     messages.success(request, "Course marked as completed.")
-
     return redirect("notifications")
+
+
+@login_required
+def rate_mentor(request, connection_id):
+    """Rate a mentor after course completion."""
+    email = request.user.email
+
+    result = (
+        supabase
+        .table("connections")
+        .select("*")
+        .eq("id", connection_id)
+        .maybe_single()
+        .execute()
+    )
+
+    if not result.data:
+        messages.error(request, "Connection not found.")
+        return redirect("notifications")
+
+    connection = result.data
+
+    # Only learner can rate
+    if connection["sender_email"] != email:
+        messages.error(request, "Only the learner can rate the mentor.")
+        return redirect("notifications")
+
+    # Course must be completed
+    if not connection.get("completed"):
+        messages.error(request, "Complete the course before rating.")
+        return redirect("notifications")
+
+    # Prevent duplicate ratings
+    if connection.get("rated"):
+        messages.info(request, "You have already rated this mentor.")
+        return redirect("notifications")
+
+    if request.method == "POST":
+        rating = request.POST.get("rating")
+        review = request.POST.get("review", "").strip()
+
+        if not rating:
+            messages.error(request, "Please select a rating.")
+            return render(
+                request,
+                "user/rating.html",
+                {"connection": connection}
+            )
+
+        rating = float(rating)
+
+        if rating < 1 or rating > 5:
+            messages.error(request, "Invalid rating.")
+            return redirect("notifications")
+
+        # Update rating in connections table
+        (
+            supabase
+            .table("connections")
+            .update({
+                "rating": rating,
+                "review": review,
+                "rated": True
+            })
+            .eq("id", connection_id)
+            .execute()
+        )
+
+        # Send notification to mentor
+        create_notification(
+            user_email=connection["receiver_email"],
+            sender_email=connection["sender_email"],
+            title="New Rating",
+            message=f"{connection['sender_email']} rated you {rating} ⭐",
+            notification_type="RATING",
+            connection_id=connection_id,
+            rating=rating,
+            review=review,
+        )
+        messages.success(
+            request,
+            "Thank you for rating your mentor!"
+        )
+
+        return redirect("notifications")
+
+    return render(
+        request,
+        "user/rating.html",
+        {"connection": connection}
+    )
+
+
+@login_required
+def my_connections(request):
+    """Display user's connections."""
+    email = request.user.email
+
+    teaching = (
+        supabase.table("connections")
+        .select("*")
+        .eq("mentor_email", email)
+        .eq("completed", False)
+        .order("created_at", desc=True)
+        .execute()
+        .data or []
+    )
+
+    learning = (
+        supabase.table("connections")
+        .select("*")
+        .eq("learner_email", email)
+        .eq("completed", False)
+        .order("created_at", desc=True)
+        .execute()
+        .data or []
+    )
+
+    completed = (
+        supabase.table("connections")
+        .select("*")
+        .or_(f"mentor_email.eq.{email},learner_email.eq.{email}")
+        .eq("completed", True)
+        .order("completed_at", desc=True)
+        .execute()
+        .data or []
+    )
+
+    def attach_profile_ids_local(rows, other_email_field):
+        """Attach profile IDs to rows."""
+        for row in rows:
+            profile = get_profile_by_email(row.get(other_email_field))
+
+            if profile:
+                profile["profile_image_url"] = build_image_url(
+                    profile.get("profile_image")
+                )
+
+            row["other_profile"] = profile
+            row["other_profile_id"] = (
+                profile.get("id") if profile and profile.get("id") else None
+            )
+
+        return rows
+
+    teaching = attach_profile_ids_local(teaching, "learner_email")
+    learning = attach_profile_ids_local(learning, "mentor_email")
+    completed = attach_profile_ids_local(completed, "mentor_email")
+
+    return render(request, "user/my_connections.html", {
+        "teaching_connections": teaching,
+        "learning_connections": learning,
+        "completed_connections": completed,
+    })
+
+
+# ======================== AI and Quiz Views ========================
 
 @csrf_exempt
 def generate_question(request):
+    """Generate an interview question."""
     data = json.loads(request.body)
     skill = data["skill"]
     return JsonResponse({
         "question": f"What is your experience with {skill}?"
     })
 
+
 def test_ai(request):
-    return JsonResponse({
-        "message": "AI Route Working"
-    })
+    """Test AI route."""
+    return JsonResponse({"message": "AI Route Working"})
+
 
 @csrf_exempt
 def evaluate_answer(request):
+    """Evaluate quiz answers."""
     if request.method != "POST":
         return JsonResponse({"error": "POST only"}, status=405)
+
     data = json.loads(request.body)
     skill = data.get("skill", "").strip()
     answer = data.get("answer", "").strip()
     question_no = int(data.get("question_no", 1))
+
     questions = [
         f"What is {skill}?",
         f"What are the advantages of {skill}?",
@@ -1829,19 +1699,186 @@ def evaluate_answer(request):
     })
 
 
-from supabase import create_client
-from datetime import datetime, timedelta, timezone
-from django.conf import settings
-from collections import Counter
-from django.shortcuts import render
-from collections import Counter
-from django.conf import settings
-import matplotlib.pyplot as plt
-import os
+# ======================== Placeholder Views ========================
 
+def assignments(request):
+    """Display assignments page."""
+    return render(request, "user/assignments.html")
+
+
+def interview(request):
+    """Display interview page."""
+    return render(request, "user/interview.html")
+
+
+def progress(request):
+    """Display progress page."""
+    return render(request, "user/progress.html")
+
+
+def usersubscriptions(request):
+    """Display user subscriptions page."""
+    return render(request, "user/usersubscriptions.html")
+
+
+def rating(request):
+    """Display rating page."""
+    return render(request, "user/rating.html")
+
+
+def my_page(request):
+    """Display user's sessions page."""
+    return render(request, "user/sessions.html", {})
+
+
+# ======================== Premium/Payment Views ========================
+
+@login_required
+def premium_page(request):
+    """Display premium upgrade page."""
+    profile, _ = Profile.objects.get_or_create(
+        user=request.user,
+        defaults={
+            "full_name": request.user.get_full_name() or request.user.username,
+            "email": request.user.email,
+        }
+    )
+
+    if profile.is_premium:
+        return redirect("premium_dashboard")
+
+    client = razorpay.Client(
+        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+    )
+
+    order_data = {
+        "amount": settings.PREMIUM_PRICE_PAISE,
+        "currency": "INR",
+        "payment_capture": 1
+    }
+
+    order = client.order.create(data=order_data)
+
+    profile.razorpay_order_id = order["id"]
+    profile.premium_amount = settings.PREMIUM_PRICE_RUPEES
+    profile.save()
+
+    context = {
+        "profile": profile,
+        "razorpay_key": settings.RAZORPAY_KEY_ID,
+        "order_id": order["id"],
+        "amount": settings.PREMIUM_PRICE_PAISE,
+        "display_amount": settings.PREMIUM_PRICE_RUPEES,
+        "user_name": profile.full_name or request.user.username,
+        "user_email": request.user.email,
+    }
+    return render(request, "user/premium_payment.html", context)
+
+
+@login_required(login_url="login_view")
+def premium_chat(request):
+    """Display premium chat page."""
+    profile, _ = Profile.objects.get_or_create(user=request.user)
+
+    if not profile.is_premium:
+        messages.error(request, "This feature is available only for premium users.")
+        return redirect("premium_page")
+
+    return render(request, "user/premium_chat.html")
+
+
+@csrf_exempt
+def verify_razorpay_payment(request):
+    """Verify Razorpay payment signature."""
+    if request.method != "POST":
+        return JsonResponse(
+            {"success": False, "message": "Invalid request"},
+            status=405
+        )
+
+    data = json.loads(request.body)
+
+    razorpay_order_id = data.get("razorpay_order_id")
+    razorpay_payment_id = data.get("razorpay_payment_id")
+    razorpay_signature = data.get("razorpay_signature")
+
+    client = razorpay.Client(
+        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+    )
+
+    try:
+        client.utility.verify_payment_signature({
+            "razorpay_order_id": razorpay_order_id,
+            "razorpay_payment_id": razorpay_payment_id,
+            "razorpay_signature": razorpay_signature
+        })
+        return JsonResponse({
+            "success": True,
+            "message": "Payment verified successfully"
+        })
+    except Exception as e:
+        return JsonResponse({
+            "success": False,
+            "message": str(e)
+        }, status=400)
+
+
+@login_required
+def create_order(request):
+    """Create a Razorpay order."""
+    request.session["payment_user_email"] = request.user.email
+    print("Saved Email:", request.session["payment_user_email"])
+
+    amount = 299
+
+    client = razorpay.Client(
+        auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+    )
+
+    order = client.order.create({
+        "amount": amount * 100,
+        "currency": "INR",
+        "receipt": f"receipt_{request.user.id}",
+    })
+
+    return JsonResponse({
+        "success": True,
+        "order_id": order["id"],
+        "amount": amount * 100,
+        "currency": "INR",
+        "key": settings.RAZORPAY_KEY_ID,
+    })
+
+
+@login_required(login_url="login_view")
+def payment_success(request):
+    """Handle successful payment."""
+    email = request.user.email
+
+    try:
+        response = (
+            supabase.table("app1_profile")
+            .update({
+                "is_premium": True,
+                "premium_amount": 299,
+                "premium_plan": "premium"
+            })
+            .eq("email", email)
+            .select("id, email, is_premium, premium_amount, premium_plan")
+            .execute()
+        )
+
+        return redirect("dashboard")
+
+    except Exception as e:
+        print("Payment update failed:", str(e))
+        return redirect("dashboard")
+
+
+# ======================== Admin Dashboard Views ========================
 
 def admindashboard(request):
-
+    """Display admin dashboard with analytics."""
     total_users = (
         supabase.table("app1_profile")
         .select("*", count="exact", head=True)
@@ -1856,11 +1893,10 @@ def admindashboard(request):
         .data or []
     )
 
-    # ---------- Skill Analytics ----------
+    # Skill Analytics
     all_skills = []
 
     for profile in profiles:
-
         teach_skills = profile.get("teach_skills") or []
         learn_skills = profile.get("learn_skills") or []
 
@@ -1883,13 +1919,11 @@ def admindashboard(request):
         ]
 
         all_skills.extend(teach_skills)
-    
 
     unique_skills = sorted(set(all_skills))
-
     skill_counts = Counter(all_skills)
 
-    # Continue with the rest of your code...
+    # Revenue
     revenue_rows = (
         supabase.table("app1_profile")
         .select("premium_amount")
@@ -1903,6 +1937,7 @@ def admindashboard(request):
         if row.get("premium_amount")
     )
 
+    # Recent Users
     recent_users = (
         supabase.table("auth_user")
         .select("email, date_joined")
@@ -1912,6 +1947,7 @@ def admindashboard(request):
         .data or []
     )
 
+    # User Join Dates
     all_users = (
         supabase.table("auth_user")
         .select("date_joined")
@@ -1928,6 +1964,7 @@ def admindashboard(request):
 
     join_counts = Counter(join_dates)
 
+    # Recent Payments
     recent_payments = (
         supabase.table("app1_profile")
         .select(
@@ -1938,46 +1975,27 @@ def admindashboard(request):
         .execute()
         .data or []
     )
-    charts_dir = os.path.join(
-        settings.BASE_DIR,
-        "static",
-        "charts"
-    )
 
+    # Generate Chart
+    charts_dir = os.path.join(settings.BASE_DIR, "static", "charts")
     os.makedirs(charts_dir, exist_ok=True)
 
-    chart_path = os.path.join(
-        charts_dir,
-        "recent_users_chart.png"
-    )
+    chart_path = os.path.join(charts_dir, "recent_users_chart.png")
 
     dates = sorted(join_counts.keys())
     counts = [join_counts[d] for d in dates]
 
     plt.figure(figsize=(10, 5))
-
-    plt.plot(
-        dates,
-        counts,
-        marker="o",
-        linewidth=2
-    )
-
+    plt.plot(dates, counts, marker="o", linewidth=2)
     plt.title("Daily User Registrations")
     plt.xlabel("Date")
     plt.ylabel("Users Joined")
     plt.xticks(rotation=45)
     plt.grid(True)
-
     plt.tight_layout()
-
-    plt.savefig(
-        chart_path,
-        dpi=150,
-        bbox_inches="tight"
-    )
-
+    plt.savefig(chart_path, dpi=150, bbox_inches="tight")
     plt.close()
+
     context = {
         "total_users": total_users,
         "premium_users": sum(
@@ -1997,35 +2015,32 @@ def admindashboard(request):
         "recent_users_chart": "/static/charts/recent_users_chart.png",
     }
 
-    return render(
-        request,
-        "admin/admin-dashboard.html",
-        context,
-    )
+    return render(request, "admin/admin-dashboard.html", context)
 
-from django.core.paginator import Paginator
 
 def usermanagement(request):
-
-  
+    """Display user management page."""
     total_users = (
         supabase.table("app1_profile")
         .select("*", count="exact", head=True)
         .execute()
         .count or 0
     )
+
     profiles = (
         supabase.table("app1_profile")
         .select("id,full_name,email,is_premium")
         .execute()
         .data or []
     )
+
     auth_users = (
         supabase.table("auth_user")
         .select("email,is_active,date_joined")
         .execute()
         .data or []
     )
+
     premium_users = sum(
         1 for p in profiles
         if p.get("is_premium")
@@ -2041,7 +2056,6 @@ def usermanagement(request):
     users = []
 
     for profile in profiles:
-
         email = profile.get("email")
 
         auth_user = next(
@@ -2076,8 +2090,7 @@ def usermanagement(request):
         ]
 
     # Pagination
-    paginator = Paginator(users, 5)  # 10 users per page
-
+    paginator = Paginator(users, 5)
     page_number = request.GET.get("page")
     page_obj = paginator.get_page(page_number)
 
@@ -2091,16 +2104,70 @@ def usermanagement(request):
         "search": search,
     }
 
-    return render(
-        request,
-        "admin/user-management.html",
-        context
+    return render(request, "admin/user-management.html", context)
+
+
+def skillmanagement(request):
+    """Display skill management page."""
+    return render(request, "admin/skill-management.html")
+
+
+def support(request):
+    """Display support/feedback page."""
+    requests_data = (
+        supabase.table("app1_contactmessage")
+        .select("*")
+        .execute()
+        .data or []
     )
 
+    total_requests = len(requests_data)
 
-def export_users_csv(request): 
+    open_issues = len([
+        r for r in requests_data
+        if r.get("status") == "Open"
+    ])
+
+    resolved_issues = len([
+        r for r in requests_data
+        if r.get("status") == "Resolved"
+    ])
+
+    messages_count = total_requests
+
+    paginator = Paginator(requests_data, 5)
+    page_number = request.GET.get("page")
+    page_obj = paginator.get_page(page_number)
+
+    context = {
+        "total_requests": total_requests,
+        "open_issues": open_issues,
+        "resolved_issues": resolved_issues,
+        "messages_count": messages_count,
+        "requests": requests_data,
+        "page_obj": page_obj,
+    }
+
+    return render(request, "admin/support-feedback.html", context)
+
+
+def update_request_status(request, request_id, status):
+    """Update support request status."""
+    support_request = get_object_or_404(
+        ContactMessage,
+        id=request_id
+    )
+
+    if status in ["Open", "In Progress", "Resolved"]:
+        support_request.status = status
+        support_request.save()
+
+    return redirect("support")
+
+
+def export_users_csv(request):
+    """Export users as CSV."""
     print("CSV Export Started")
-
 
     profiles = (
         supabase.table("app1_profile")
@@ -2130,7 +2197,6 @@ def export_users_csv(request):
     ])
 
     for profile in profiles:
-
         email = profile.get("email")
 
         auth_user = next(
@@ -2155,11 +2221,10 @@ def export_users_csv(request):
         ])
 
     return response
-from django.core.paginator import Paginator
-from datetime import datetime
+
 
 def subscriptions(request):
-
+    """Display subscriptions page."""
     profiles = (
         supabase.table("app1_profile")
         .select("id,full_name,email,is_premium")
@@ -2196,7 +2261,6 @@ def subscriptions(request):
     subscriptions_list = []
 
     for profile in profiles:
-
         auth_user = next(
             (
                 u for u in auth_users
@@ -2219,19 +2283,18 @@ def subscriptions(request):
                 ):
                     new_users_this_month += 1
 
-            except:
+            except Exception:
                 pass
 
         subscriptions_list.append({
-              "id": profile.get("id"),
-              "full_name": profile.get("full_name"),
-              "email": profile.get("email"),
-              "is_premium": profile.get("is_premium"),  # MUST BE HERE
-              "plan": "Premium" if profile.get("is_premium") else "Free",
-              "amount": 299 if profile.get("is_premium") else 0,
-              "is_active": auth_user.get("is_active", False),
-              "date_joined": auth_user.get("date_joined"),
-
+            "id": profile.get("id"),
+            "full_name": profile.get("full_name"),
+            "email": profile.get("email"),
+            "is_premium": profile.get("is_premium"),
+            "plan": "Premium" if profile.get("is_premium") else "Free",
+            "amount": 299 if profile.get("is_premium") else 0,
+            "is_active": auth_user.get("is_active", False),
+            "date_joined": auth_user.get("date_joined"),
         })
 
     subscriptions_list.sort(
@@ -2241,7 +2304,6 @@ def subscriptions(request):
 
     # Pagination
     paginator = Paginator(subscriptions_list, 5)
-
     page_number = request.GET.get("page")
     page_obj = paginator.get_page(page_number)
 
@@ -2255,18 +2317,11 @@ def subscriptions(request):
         "page_obj": page_obj,
     }
 
-    return render(
-        request,
-        "admin/subscriptions.html",
-        context
-    )
+    return render(request, "admin/subscriptions.html", context)
 
-from django.http import HttpResponse
-from reportlab.pdfgen import canvas
-from datetime import datetime
 
 def download_receipt(request, user_id):
-
+    """Download payment receipt as PDF."""
     profile = (
         supabase.table("app1_profile")
         .select("*")
@@ -2279,10 +2334,7 @@ def download_receipt(request, user_id):
     if not profile:
         return HttpResponse("User not found")
 
-    response = HttpResponse(
-        content_type="application/pdf"
-    )
-
+    response = HttpResponse(content_type="application/pdf")
     response[
         "Content-Disposition"
     ] = f'attachment; filename="receipt_{user_id}.pdf"'
@@ -2348,17 +2400,8 @@ def download_receipt(request, user_id):
     return response
 
 
-
-from collections import Counter,OrderedDict
-
-from django.shortcuts import render
-
-from django.conf import settings
-import matplotlib.pyplot as plt
-import os
-
-
 def analytics(request):
+    """Display analytics page with charts."""
     profiles = (
         supabase.table("app1_profile")
         .select(
@@ -2374,7 +2417,6 @@ def analytics(request):
         .execute()
         .data or []
     )
-
 
     user_join_dates = {}
 
@@ -2392,15 +2434,14 @@ def analytics(request):
     free_users = total_users - premium_users
 
     revenue = sum(
-    p.get("premium_amount", 0)
-    for p in profiles
-    if p.get("is_premium")
-)
+        p.get("premium_amount", 0)
+        for p in profiles
+        if p.get("is_premium")
+    )
 
     all_skills = []
 
     for profile in profiles:
-
         teach_skills = profile.get("teach_skills") or []
         learn_skills = profile.get("learn_skills") or []
 
@@ -2423,168 +2464,104 @@ def analytics(request):
         ]
 
         all_skills.extend(teach_skills)
-       
 
     unique_skills = sorted(set(all_skills))
-
     skill_counts = Counter(all_skills)
 
-   
     monthly_revenue = OrderedDict({
-    "Jan": 0,
-    "Feb": 0,
-    "Mar": 0,
-    "Apr": 0,
-    "May": 0,
-    "Jun": 0,
-    "Jul": 0,
-    "Aug": 0,
-    "Sep": 0,
-    "Oct": 0,
-    "Nov": 0,
-    "Dec": 0,
-})
+        "Jan": 0, "Feb": 0, "Mar": 0, "Apr": 0,
+        "May": 0, "Jun": 0, "Jul": 0, "Aug": 0,
+        "Sep": 0, "Oct": 0, "Nov": 0, "Dec": 0,
+    })
 
     for profile in profiles:
+        if profile.get("is_premium"):
+            email = profile.get("email")
 
-       if profile.get("is_premium"):
-
-        email = profile.get("email")
-
-        if email in user_join_dates:
-
-            date = datetime.fromisoformat(
-                user_join_dates[email].replace("Z", "+00:00")
-            )
-            month = date.strftime("%b")
-            monthly_revenue[month] += (
-                profile.get("premium_amount") or 299
-            )
+            if email in user_join_dates:
+                date = datetime.fromisoformat(
+                    user_join_dates[email].replace("Z", "+00:00")
+                )
+                month = date.strftime("%b")
+                monthly_revenue[month] += (
+                    profile.get("premium_amount") or 299
+                )
 
     subscription_counter = OrderedDict({
-    "Jan": 0,
-    "Feb": 0,
-    "Mar": 0,
-    "Apr": 0,
-    "May": 0,
-    "Jun": 0,
-    "Jul": 0,
-    "Aug": 0,
-    "Sep": 0,
-    "Oct": 0,
-    "Nov": 0,
-    "Dec": 0,
-})
+        "Jan": 0, "Feb": 0, "Mar": 0, "Apr": 0,
+        "May": 0, "Jun": 0, "Jul": 0, "Aug": 0,
+        "Sep": 0, "Oct": 0, "Nov": 0, "Dec": 0,
+    })
 
     for profile in profiles:
+        if profile.get("is_premium"):
+            email = profile.get("email")
 
-      if profile.get("is_premium"):
+            if email in user_join_dates:
+                date = datetime.fromisoformat(
+                    user_join_dates[email].replace("Z", "+00:00")
+                )
+                month = date.strftime("%b")
+                subscription_counter[month] += 1
 
-        email = profile.get("email")
-
-        if email in user_join_dates:
-
-            month = date.strftime("%b")
-
-            subscription_counter[month] += 1
-    charts_dir = os.path.join(
-        settings.BASE_DIR,
-        "static",
-        "charts"
-    )
-
+    charts_dir = os.path.join(settings.BASE_DIR, "static", "charts")
     os.makedirs(charts_dir, exist_ok=True)
-    revenue_chart = os.path.join(
-    charts_dir,
-    "revenue_chart.png"
-)
+
+    # Revenue Chart
+    revenue_chart = os.path.join(charts_dir, "revenue_chart.png")
     months = list(monthly_revenue.keys())
     revenues = list(monthly_revenue.values())
 
     plt.figure(figsize=(9, 5))
-
-    plt.bar(
-    months,
-    revenues,
-    color="#0d6efd"
-)
-
+    plt.bar(months, revenues, color="#0d6efd")
     plt.title("Monthly Revenue")
     plt.xlabel("Month")
     plt.ylabel("Revenue (₹)")
     plt.grid(axis="y")
-
     plt.tight_layout()
-
     plt.savefig(revenue_chart)
-
     plt.close()
-    skills_chart = os.path.join(charts_dir,"skills_chart.png")
+
+    # Skills Chart
+    skills_chart = os.path.join(charts_dir, "skills_chart.png")
     top_skills = skill_counts.most_common(10)
 
     skills = [skill for skill, count in top_skills]
     counts = [count for skill, count in top_skills]
 
-    plt.figure(figsize=(8,5))
-
-    plt.bar(
-    skills,
-    counts,
-    color="#0d6efd")
-
+    plt.figure(figsize=(8, 5))
+    plt.bar(skills, counts, color="#0d6efd")
     plt.xticks(rotation=30, ha="right")
-
     plt.title("Top 10 Popular Skills")
     plt.xlabel("Skills")
     plt.ylabel("Users")
-
     plt.tight_layout()
-
     plt.savefig(skills_chart)
-
     plt.close()
-    pie_chart = os.path.join(charts_dir,"pie_chart.png")
-    
-    plt.figure(figsize=(6, 6))
 
+    # Pie Chart
+    pie_chart = os.path.join(charts_dir, "pie_chart.png")
+
+    plt.figure(figsize=(6, 6))
     plt.pie(
         [free_users, premium_users],
         labels=["Free", "Premium"],
         autopct="%1.1f%%",
-        colors=["#6c757d","#0d6efd"],
+        colors=["#6c757d", "#0d6efd"],
         startangle=90,
-       
     )
-
     plt.title("Free vs Premium Users")
-
     plt.savefig(pie_chart)
-
     plt.close()
-    subscription_chart = os.path.join(
-    charts_dir,
-    "subscription_chart.png"
-)
+
+    # Subscription Chart
+    subscription_chart = os.path.join(charts_dir, "subscription_chart.png")
     months = list(subscription_counter.keys())
     subscriptions = list(subscription_counter.values())
 
     plt.figure(figsize=(9, 5))
-
-    plt.plot(
-    months,
-    subscriptions,
-    marker="o",
-    linewidth=3,
-    color="#198754"
-)
-
-    plt.fill_between(
-    months,
-    subscriptions,
-    alpha=0.3,
-    color="#198754"
-)
-
+    plt.plot(months, subscriptions, marker="o", linewidth=3, color="#198754")
+    plt.fill_between(months, subscriptions, alpha=0.3, color="#198754")
     plt.title("Monthly Premium Subscriptions")
     plt.xlabel("Month")
     plt.ylabel("Premium Users")
@@ -2592,18 +2569,13 @@ def analytics(request):
     plt.tight_layout()
     plt.savefig(subscription_chart)
     plt.close()
+
     context = {
-
         "total_users": total_users,
-
         "premium_users": premium_users,
-
         "free_users": free_users,
-
         "revenue": revenue,
-
         "active_skills": len(unique_skills),
-
         "skills_data": [
             {
                 "name": skill,
@@ -2611,281 +2583,10 @@ def analytics(request):
             }
             for skill in unique_skills
         ],
-
         "revenue_chart": "/static/charts/revenue_chart.png",
-
         "skills_chart": "/static/charts/skills_chart.png",
-
         "pie_chart": "/static/charts/pie_chart.png",
-
         "subscription_chart": "/static/charts/subscription_chart.png",
-
     }
 
-    return render(
-        request,
-        "admin/analytics.html",
-        context
-    )
-
-def support(request):
-
-    requests = (
-        supabase.table("app1_contactmessage")
-        .select("*")
-        .execute()
-        .data or []
-    )
-
-
-    total_requests = len(requests)
-
-    open_issues = len([
-        r for r in requests
-        if r.get("status") == "Open"
-    ])
-
-    resolved_issues = len([
-        r for r in requests
-        if r.get("status") == "Resolved"
-    ])
-
-    messages_count = total_requests
-
-    paginator = Paginator(requests, 5)
-
-    page_number = request.GET.get("page")
-
-    page_obj = paginator.get_page(page_number)
-
-    context = {
-        "total_requests": total_requests,
-        "open_issues": open_issues,
-        "resolved_issues": resolved_issues,
-        "messages_count": messages_count,
-        "requests": requests,
-        "page_obj": page_obj,
-    }
-
-    return render(
-        request,
-        "admin/support-feedback.html",
-        context
-    )
-
-from django.shortcuts import get_object_or_404, redirect
-
-def update_request_status(request, request_id, status):
-
-    support_request = get_object_or_404(
-        ContactMessage,
-        id=request_id
-    )
-
-    if status in ["Open", "In Progress", "Resolved"]:
-        support_request.status = status
-        support_request.save()
-
-    return redirect("support")
-
-from django.contrib.auth.decorators import login_required
-
-def rating(request):
-    return render(request,'user/rating.html')
-
-
-@login_required
-def rate_mentor(request, connection_id):
-
-    email = request.user.email
-
-    result = (
-        supabase
-        .table("connections")
-        .select("*")
-        .eq("id", connection_id)
-        .maybe_single()
-        .execute()
-    )
-
-    if not result.data:
-        messages.error(request, "Connection not found.")
-        return redirect("notifications")
-
-    connection = result.data
-
-    # Only learner can rate
-    if connection["sender_email"] != email:
-        messages.error(request, "Only the learner can rate the mentor.")
-        return redirect("notifications")
-
-    # Course must be completed
-    if not connection.get("completed"):
-        messages.error(request, "Complete the course before rating.")
-        return redirect("notifications")
-
-    # Prevent duplicate ratings
-    if connection.get("rated"):
-        messages.info(request, "You have already rated this mentor.")
-        return redirect("notifications")
-
-    if request.method == "POST":
-
-        rating = request.POST.get("rating")
-        review = request.POST.get("review", "").strip()
-
-        if not rating:
-            messages.error(request, "Please select a rating.")
-            return render(
-                request,
-                "user/rating.html",
-                {
-                    "connection": connection
-                }
-            )
-
-        rating = float(rating)
-
-        if rating < 1 or rating > 5:
-            messages.error(request, "Invalid rating.")
-            return redirect("notifications")
-
-        # Update rating in connections table
-        (
-            supabase
-            .table("connections")
-            .update({
-                "rating": rating,
-                "review": review,
-                "rated": True
-            })
-            .eq("id", connection_id)
-            .execute()
-        )
-
-        # Send notification to mentor
-        create_notification(
-            user_email=connection["receiver_email"],
-            sender_email=connection["sender_email"],
-            title="New Rating",
-            message=f"{connection['sender_email']} rated you {rating} ⭐",
-            notification_type="RATING",
-            connection_id=connection_id,
-            rating=rating,
-            review=review,
-        )
-        messages.success(
-            request,
-            "Thank you for rating your mentor!"
-        )
-
-        return redirect("notifications")
-
-    return render(
-        request,
-        "user/rating.html",
-        {
-            "connection": connection
-        }
-    )
-
-
-def my_connections(request):
-    return render(request,'user/my_connections.html')
-
-
-
-from django.conf import settings
-from django.shortcuts import render
-from django.contrib.auth.decorators import login_required
-from supabase import create_client
-
-supabase = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
-
-@login_required
-def my_connections(request):
-    email = request.user.email
-
-    teaching = (
-        supabase.table("connections")
-        .select("*")
-        .eq("mentor_email", email)
-        .eq("completed", False)
-        .order("created_at", desc=True)
-        .execute()
-        .data or []
-    )
-
-    learning = (
-        supabase.table("connections")
-        .select("*")
-        .eq("learner_email", email)
-        .eq("completed", False)
-        .order("created_at", desc=True)
-        .execute()
-        .data or []
-    )
-
-    completed = (
-        supabase.table("connections")
-        .select("*")
-        .or_(f"mentor_email.eq.{email},learner_email.eq.{email}")
-        .eq("completed", True)
-        .order("completed_at", desc=True)
-        .execute()
-        .data or []
-    )
-
-    def get_profile_by_email(other_email):
-        if not other_email:
-            return None
-
-        profile = (
-            supabase.table("app1_profile")
-            .select("id, email, full_name, professional_title, location, bio, profile_image, learn_skills, teach_skills, education, experience, achievements")
-            .eq("email", other_email)
-            .maybe_single()
-            .execute()
-            .data
-        )
-
-
-        return profile
-
-    def build_image_url(image_path):
-      if not image_path:
-         return None
-
-      if image_path.startswith(("http://", "https://")):
-        return image_path
-
-      url = settings.MEDIA_URL + image_path.lstrip("/")
-      return url
-
-    def attach_profile_ids(rows, other_email_field):
-        for row in rows:
-            profile = get_profile_by_email(row.get(other_email_field))
-
-            if profile:
-                profile["profile_image_url"] = build_image_url(profile.get("profile_image"))
-
-            row["other_profile"] = profile
-            row["other_profile_id"] = profile.get("id") if profile and profile.get("id") else None
-
-        return rows
-
-    teaching = attach_profile_ids(teaching, "learner_email")
-    learning = attach_profile_ids(learning, "mentor_email")
-    completed = attach_profile_ids(completed, "mentor_email")
-
-    return render(request, "user/my_connections.html", {
-        "teaching_connections": teaching,
-        "learning_connections": learning,
-        "completed_connections": completed,
-    })
-
-
-from django.utils import timezone
-
-def my_page(request):
-    return render(request, "user/sessions.html", {})
+    return render(request, "admin/analytics.html", context)
