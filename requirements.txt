@@ -13,3 +13,4 @@ google-auth
 google-auth-oauthlib
 whitenoise
 google-generativeai
+matplotlib
