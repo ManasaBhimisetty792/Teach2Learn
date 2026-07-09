@@ -28,6 +28,7 @@ from django.core.files.storage import FileSystemStorage
 from reportlab.pdfgen import canvas
 from django.http import HttpResponse
 import os
+from app1.utils import upload_profile_image
 from .supabase_client import supabase
 from app1.supabase_client import supabase
 from datetime import datetime
@@ -420,7 +421,9 @@ def editProfile(request):
         profile.bio = request.POST.get("bio", "").strip()
 
         if request.FILES.get("profile_image"):
-            profile.profile_image = request.FILES.get("profile_image")
+            image = request.FILES["profile_image"]
+            image_url = upload_profile_image(image)
+            profile.profile_image = image_url
 
         profile.linkedin = request.POST.get("linkedin", "").strip()
         profile.github = request.POST.get("github", "").strip()
@@ -440,14 +443,33 @@ def editProfile(request):
         profile.learn_skills = [
             skill.strip() for skill in learn_skills_raw.split(",") if skill.strip()
         ]
+
         profile.save()
         messages.success(request, "Profile updated successfully.")
         return redirect("editProfile")
 
     return render(request, "user/editProfile.html", {"profile": profile})
 
+
+
+@login_required
 def certifications(request):
-    return render(request,'user/certifications.html')
+    user_profile = (
+        supabase.table("app1_profile")
+        .select("*")
+        .eq("email", request.user.email)
+        .maybe_single()
+        .execute()
+        .data
+    )
+
+    return render(
+        request,
+        "user/certifications.html",
+        {
+            "profile": user_profile,
+        },
+    )
 
 
 @login_required
@@ -921,8 +943,24 @@ def assignments(request):
 def chat(request):
     return render(request,'user/chat.html')
 
+@login_required
 def interview(request):
-    return render(request,'user/interview.html')
+    user_profile = (
+        supabase.table("app1_profile")
+        .select("*")
+        .eq("email", request.user.email)
+        .maybe_single()
+        .execute()
+        .data
+    )
+
+    return render(
+        request,
+        "user/interview.html",
+        {
+            "profile": user_profile,
+        },
+    )
 
 def progress(request):
     return render(request,'user/progress.html')
@@ -1075,8 +1113,17 @@ def connection_requests(request):
 
 @login_required
 def notifications(request):
-
     email = request.user.email
+
+    # Fetch logged-in user's profile (for navbar/profile image)
+    user_profile = (
+        supabase.table("app1_profile")
+        .select("*")
+        .eq("email", email)
+        .maybe_single()
+        .execute()
+        .data
+    )
 
     # Mark all notifications as read
     supabase.table("notifications").update({
@@ -1169,11 +1216,13 @@ def notifications(request):
         request,
         "user/notifications.html",
         {
+            "profile": user_profile,
             "notifications": notifications,
             "notification_count": notification_count,
             "connected_users": [],
         },
     )
+
 @login_required
 def accept_request(request, request_id):
     connection = (
@@ -1328,20 +1377,39 @@ def send_message(request):
 
 from django.core.files.storage import FileSystemStorage
 
+from django.core.files.storage import FileSystemStorage
+from django.contrib.auth.decorators import login_required
+from django.shortcuts import render, redirect
+import os
+
+
+@login_required
 def chat(request, email=None):
-    if not request.user.is_authenticated:
-        return redirect("login_view")
 
     current_user = request.user.email
     selected_user = email
 
+    # Logged-in user's profile (for navbar profile image)
+    user_profile = (
+        supabase.table("app1_profile")
+        .select("*")
+        .eq("email", current_user)
+        .maybe_single()
+        .execute()
+        .data
+    )
+
     if request.method == "POST" and email:
+
         assignment_file = request.FILES.get("assignment_file")
         deadline = request.POST.get("deadline") or None
         submission_file = request.FILES.get("submission_file")
 
+        # ---------------- Assignment Upload ---------------- #
+
         if assignment_file:
             upload_dir = "media/assignments"
+
             if not os.path.exists(upload_dir):
                 os.makedirs(upload_dir)
 
@@ -1354,7 +1422,7 @@ def chat(request, email=None):
                 "receiver_email": email,
                 "message": f"Assignment: {filename}",
                 "file_url": file_url,
-                "deadline": deadline
+                "deadline": deadline,
             }).execute()
 
             supabase.table("notifications").insert({
@@ -1365,13 +1433,16 @@ def chat(request, email=None):
                 "file_url": file_url,
                 "deadline": deadline,
                 "type": "ASSIGNMENT",
-                "status": "unread"
+                "status": "unread",
             }).execute()
 
             return redirect("chat_with_user", email=email)
 
+        # ---------------- Assignment Submission ---------------- #
+
         if submission_file:
             upload_dir = "media/assignments"
+
             if not os.path.exists(upload_dir):
                 os.makedirs(upload_dir)
 
@@ -1383,7 +1454,7 @@ def chat(request, email=None):
                 "sender_email": current_user,
                 "receiver_email": email,
                 "message": f"Assignment Submission: {filename}",
-                "file_url": file_url
+                "file_url": file_url,
             }).execute()
 
             supabase.table("notifications").insert({
@@ -1394,10 +1465,12 @@ def chat(request, email=None):
                 "file_url": file_url,
                 "deadline": deadline,
                 "type": "SUBMISSION",
-                "status": "unread"
+                "status": "unread",
             }).execute()
 
             return redirect("chat_with_user", email=email)
+
+        # ---------------- Normal Message ---------------- #
 
         message = request.POST.get("message", "").strip()
 
@@ -1405,7 +1478,7 @@ def chat(request, email=None):
             supabase.table("messages").insert({
                 "sender_email": current_user,
                 "receiver_email": email,
-                "message": message
+                "message": message,
             }).execute()
 
             supabase.table("notifications").insert({
@@ -1414,12 +1487,15 @@ def chat(request, email=None):
                 "title": "New Message",
                 "message": message,
                 "type": "MESSAGE",
-                "status": "unread"
+                "status": "unread",
             }).execute()
 
             return redirect("chat_with_user", email=email)
 
-    messages = []
+    # ---------------- Fetch Chat Messages ---------------- #
+
+    chat_messages = []
+
     if email:
         result = (
             supabase.table("messages")
@@ -1431,15 +1507,17 @@ def chat(request, email=None):
             .order("created_at")
             .execute()
         )
-        messages = result.data or []
+
+        chat_messages = result.data or []
 
     return render(
         request,
         "user/chat.html",
         {
-            "messages": messages,
+            "profile": user_profile,
+            "messages": chat_messages,
             "receiver": selected_user,
-        }
+        },
     )
 
 
@@ -1606,13 +1684,24 @@ from django.contrib.auth.decorators import login_required
 from django.shortcuts import render, redirect
 
 
+
 @login_required
 def sessions(request, connection_id=None):
-
+    # Default values
     connection = None
 
-    if connection_id is not None:
+    # Logged-in user's profile (for navbar/profile image)
+    user_profile = (
+        supabase.table("app1_profile")
+        .select("*")
+        .eq("email", request.user.email)
+        .maybe_single()
+        .execute()
+        .data
+    )
 
+    # Fetch connection if connection_id is provided
+    if connection_id:
         result = (
             supabase.table("connections")
             .select("*")
@@ -1627,9 +1716,10 @@ def sessions(request, connection_id=None):
             messages.error(request, "Connection not found.")
             return redirect("notifications")
 
+    # Handle POST (Schedule Session)
     if request.method == "POST":
 
-        if connection_id is None or not connection:
+        if not connection:
             messages.error(request, "Invalid connection.")
             return redirect("notifications")
 
@@ -1645,6 +1735,7 @@ def sessions(request, connection_id=None):
                 {
                     "connection": connection,
                     "connection_id": connection_id,
+                    "profile": user_profile,
                 },
             )
 
@@ -1703,12 +1794,14 @@ def sessions(request, connection_id=None):
         messages.success(request, "Session scheduled successfully.")
         return redirect("notifications")
 
+    # GET Request
     return render(
         request,
         "user/sessions.html",
         {
             "connection": connection,
             "connection_id": connection_id,
+            "profile": user_profile,
         },
     )
 
@@ -2807,6 +2900,17 @@ supabase = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
 def my_connections(request):
     email = request.user.email
 
+    # Logged-in user's profile (navbar)
+    user_profile = (
+        supabase.table("app1_profile")
+        .select("*")
+        .eq("email", email)
+        .maybe_single()
+        .execute()
+        .data
+    )
+
+    # Teaching connections
     teaching = (
         supabase.table("connections")
         .select("*")
@@ -2817,6 +2921,7 @@ def my_connections(request):
         .data or []
     )
 
+    # Learning connections
     learning = (
         supabase.table("connections")
         .select("*")
@@ -2827,6 +2932,7 @@ def my_connections(request):
         .data or []
     )
 
+    # Completed connections
     completed = (
         supabase.table("connections")
         .select("*")
@@ -2837,54 +2943,73 @@ def my_connections(request):
         .data or []
     )
 
-    def get_profile_by_email(other_email):
-        if not other_email:
+    # Fetch profile by email
+    def get_profile_by_email(user_email):
+        if not user_email:
             return None
 
         profile = (
             supabase.table("app1_profile")
-            .select("id, email, full_name, professional_title, location, bio, profile_image, learn_skills, teach_skills, education, experience, achievements")
-            .eq("email", other_email)
+            .select(
+                "id, email, full_name, professional_title, location, bio,"
+                "profile_image, teach_skills, learn_skills,"
+                "education, experience, achievements"
+            )
+            .eq("email", user_email)
             .maybe_single()
             .execute()
             .data
         )
 
+        if profile:
+            image = profile.get("profile_image")
+
+            if image:
+                # If already a full URL, keep it
+                if image.startswith("http://") or image.startswith("https://"):
+                    profile["profile_image_url"] = image
+                else:
+                    profile["profile_image_url"] = (
+                        f"{settings.SUPABASE_URL}/storage/v1/object/public/profile-images/{image}"
+                    )
+            else:
+                profile["profile_image_url"] = None
 
         return profile
 
-    def build_image_url(image_path):
-      if not image_path:
-         return None
-
-      if image_path.startswith(("http://", "https://")):
-        return image_path
-
-      url = settings.MEDIA_URL + image_path.lstrip("/")
-      return url
-
-    def attach_profile_ids(rows, other_email_field):
+    # Attach profile to teaching/learning
+    def attach_profile(rows, other_email_field):
         for row in rows:
             profile = get_profile_by_email(row.get(other_email_field))
-
-            if profile:
-                profile["profile_image_url"] = build_image_url(profile.get("profile_image"))
-
             row["other_profile"] = profile
-            row["other_profile_id"] = profile.get("id") if profile and profile.get("id") else None
-
+            row["other_profile_id"] = profile["id"] if profile else None
         return rows
 
-    teaching = attach_profile_ids(teaching, "learner_email")
-    learning = attach_profile_ids(learning, "mentor_email")
-    completed = attach_profile_ids(completed, "mentor_email")
+    teaching = attach_profile(teaching, "learner_email")
+    learning = attach_profile(learning, "mentor_email")
 
-    return render(request, "user/my_connections.html", {
-        "teaching_connections": teaching,
-        "learning_connections": learning,
-        "completed_connections": completed,
-    })
+    # Completed connections (show the OTHER person's profile)
+    for row in completed:
+        if row["mentor_email"] == email:
+            other_email = row["learner_email"]
+        else:
+            other_email = row["mentor_email"]
 
+        profile = get_profile_by_email(other_email)
+
+        row["other_profile"] = profile
+        row["other_profile_id"] = profile["id"] if profile else None
+
+    return render(
+        request,
+        "user/my_connections.html",
+        {
+            "profile": user_profile,
+            "teaching_connections": teaching,
+            "learning_connections": learning,
+            "completed_connections": completed,
+        },
+    )
 
 from django.utils import timezone
 

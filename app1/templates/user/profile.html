@@ -447,11 +447,12 @@
                 </div>
 
     <div class="user-chip">
-      {% if profile.profile_image %}
-        <img src="{{ user.profile.profile_image.url }}" alt="Profile picture">
-      {% else %}
-        <img src="{% static 'images/default-avatar.png' %}" alt="Default avatar">
-      {% endif %}
+                         {% if profile.profile_image %}
+    <img src="{{ profile.profile_image }}" class="profile-avatar" alt="Profile picture">
+{% else %}
+    <img src="{% static 'images/default-avatar.png' %}"  class="profile-avatar" alt="Default avatar">
+{% endif %}
+
       <div class="user-info">
         <div class="user-name">{{ profile.full_name }}</div>
         {% if user.is_authenticated %}
@@ -473,11 +474,12 @@
     <section class="profile-hero">
       <div class="profile-hero-inner">
         <div class="hero-left">
-          {% if profile.profile_image %}
-            <img class="avatar-lg" src="{{ profile.profile_image.url }}" alt="Profile image">
-          {% else %}
-            <img class="avatar-lg" src="{% static 'images/default-avatar.png' %}" alt="Profile image">
-          {% endif %}
+                             {% if profile.profile_image %}
+    <img src="{{ profile.profile_image }}" class="avatar-lg" alt="Profile picture">
+{% else %}
+    <img src="{% static 'images/default-avatar.png' %}"  class="avatar-lg" alt="Default avatar">
+{% endif %}
+
           <div class="hero-copy">
             <span class="hero-label"><i class="fa-solid fa-sparkles"></i>Saved Profile View</span>
             <h2>{{ profile.full_name }}</h2>

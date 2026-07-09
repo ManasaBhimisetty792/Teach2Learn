@@ -914,11 +914,11 @@
     </div>
 
     <div class="user-chip">
-      {% if profile.profile_image %}
-        <img src="{{ user.profile.profile_image.url }}" alt="Profile picture">
-      {% else %}
-        <img src="{% static 'images/default-avatar.png' %}" alt="Default avatar">
-      {% endif %}
+     {% if profile.profile_image %}
+    <img src="{{ profile.profile_image }}" alt="Profile picture">
+{% else %}
+    <img src="{% static 'images/default-avatar.png' %}" alt="Default avatar">
+{% endif %}
       <div class="user-info">
         <div class="user-name">{{ profile.full_name }}</div>
         {% if user.is_authenticated %}
@@ -969,11 +969,11 @@
         <div class="profile-body">
           <div class="profile-header">
             <div class="profile-left">
-              {% if profile.profile_image %}
-                <img src="{{ user.profile.profile_image.url }}" class="profile-avatar" alt="Profile picture">
-              {% else %}
-                <img src="{% static 'images/default-avatar.png' %}" class="profile-avatar" alt="Default avatar">
-              {% endif %}
+                   {% if profile.profile_image %}
+    <img src="{{ profile.profile_image }}" class="profile-avatar" alt="Profile picture">
+{% else %}
+    <img src="{% static 'images/default-avatar.png' %}"  class="profile-avatar" alt="Default avatar">
+{% endif %}
 
               <div class="profile-title">
                 <h4>{{ profile.full_name }}</h4>

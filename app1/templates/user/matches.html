@@ -1108,11 +1108,11 @@
                 </div>
 
                 <div class="user-chip">
-                    {% if profile.profile_image_url %}
-                        <img src="{{ profile.profile_image_url }}" alt="Profile picture">
-                    {% else %}
-                        <img src="{% static 'images/default-avatar.png' %}" alt="Default avatar">
-                    {% endif %}
+                                    {% if profile.profile_image %}
+    <img src="{{ profile.profile_image }}" class="profile-avatar" alt="Profile picture">
+{% else %}
+    <img src="{% static 'images/default-avatar.png' %}"  class="profile-avatar" alt="Default avatar">
+{% endif %}
 
                     <div class="name">{{ user.email }}</div>
                 </div>
@@ -1149,15 +1149,11 @@
                     <h3 class="section-title">My Profile</h3>
 
                     <div class="text-center mb-4">
-                        {% if profile.profile_image_url %}
-                            <img src="{{ profile.profile_image_url }}"
-                                 class="profile-img"
-                                 alt="Profile Image">
-                        {% else %}
-                            <img src="{% static 'images/default-avatar.png' %}"
-                                 class="profile-img"
-                                 alt="Default Profile">
-                        {% endif %}
+                                           {% if profile.profile_image %}
+    <img src="{{ profile.profile_image }}" class="profile-img" alt="Profile picture">
+{% else %}
+    <img src="{% static 'images/default-avatar.png' %}"  class="profile-img" alt="Default avatar">
+{% endif %}
                     </div>
 
                     <div class="summary-block mb-3">

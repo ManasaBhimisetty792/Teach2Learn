@@ -47,7 +47,10 @@ class Profile(models.Model):
     location = models.CharField(max_length=255, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     bio = models.TextField(blank=True, null=True)
-    profile_image = models.ImageField(upload_to='profile_images/', blank=True, null=True)
+    profile_image = models.URLField(
+    blank=True,
+    null=True
+    )
     teach_skills = models.JSONField(default=list, blank=True)
     learn_skills = models.JSONField(default=list, blank=True)
     linkedin = models.URLField(blank=True, null=True)

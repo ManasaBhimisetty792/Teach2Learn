@@ -870,11 +870,11 @@
         </div>
 
         <div class="user-chip">
-          {% if user.profile.profile_image %}
-            <img src="{{ user.profile.profile_image.url }}" alt="Profile picture">
-          {% else %}
-            <img src="{% static 'images/default-avatar.png' %}" alt="Default avatar">
-          {% endif %}
+                             {% if profile.profile_image %}
+    <img src="{{ profile.profile_image }}" class="profile-avatar" alt="Profile picture">
+{% else %}
+    <img src="{% static 'images/default-avatar.png' %}"  class="profile-avatar" alt="Default avatar">
+{% endif %}
           <div class="name">{{ user.email }}</div>
         </div>
       </div>

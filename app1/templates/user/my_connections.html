@@ -899,11 +899,11 @@
         </div>
 
         <div class="user-chip">
-          {% if user.profile.profile_image %}
-            <img src="{{ user.profile.profile_image.url }}" alt="Profile picture">
-          {% else %}
-            <img src="{% static 'images/default-avatar.png' %}" alt="Default avatar">
-          {% endif %}
+                   {% if profile.profile_image %}
+    <img src="{{ profile.profile_image }}" class="profile-avatar" alt="Profile picture">
+{% else %}
+    <img src="{% static 'images/default-avatar.png' %}"  class="profile-avatar" alt="Default avatar">
+{% endif %}
           <div class="user-info">
             <div class="user-name">{{ user.username }}</div>
             <div class="user-email">{{ user.email }}</div>
@@ -951,12 +951,6 @@
               Manage your teaching, learning, and completed mentorship connections in one dashboard.
             </p>
           </div>
-
-          <!-- <div class="d-flex gap-2 flex-wrap">
-            <span class="stat-chip"><i class="fa-solid fa-user-group me-2"></i> Mentorship Hub</span>
-            <span class="stat-chip"><i class="fa-solid fa-comments me-2"></i> Live Chat</span>
-            <span class="stat-chip"><i class="fa-solid fa-bolt me-2"></i> Fast Access</span>
-          </div> -->
         </div>
 
         <ul class="nav nav-pills tab-row mt-4" role="tablist">
@@ -1221,38 +1215,6 @@
           </div>
         </div>
       </div>
-
-      <!-- <div class="section-card">
-        <div class="section-title"><i class="fa-solid fa-bolt"></i>Quick Actions</div>
-        <div class="d-grid gap-3">
-          <a href="{% url 'matches' %}" class="glass-card p-3 text-white d-flex align-items-center gap-3" style="border-radius:18px;">
-            <i class="fa-solid fa-magnifying-glass fa-lg text-warning"></i>
-            <div>
-              <div class="fw-bold">Find More Matches</div>
-              <small class="text-muted">Discover new teaching partners.</small>
-            </div>
-          </a>
-          <a href="{% url 'sessions' %}" class="glass-card p-3 text-white d-flex align-items-center gap-3" style="border-radius:18px;">
-            <i class="fa-solid fa-calendar-check fa-lg text-info"></i>
-            <div>
-              <div class="fw-bold">Upcoming Sessions</div>
-              <small class="text-muted">View or join scheduled meetings.</small>
-            </div>
-          </a>
-          <a href="{% url 'interview' %}" class="glass-card p-3 text-white d-flex align-items-center gap-3" style="border-radius:18px;">
-            <i class="fa-solid fa-robot fa-lg text-success"></i>
-            <div>
-              <div class="fw-bold">AI Interview</div>
-              <small class="text-muted">Practice your mentoring skills.</small>
-            </div>
-          </a>
-          <a href="{% url 'certifications' %}" class="glass-card p-3 text-white d-flex align-items-center gap-3" style="border-radius:18px;">
-            <i class="fa-solid fa-certificate fa-lg text-warning"></i>
-            <div>
-              <div class="fw-bold">Certificates</div>
-              <small class="text-muted">Check your earned badges.</small>
-            </div>
-          </a> -->
         </div>
       </div>
     </section>
