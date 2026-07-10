@@ -87,7 +87,7 @@
       align-items: center;
       gap: 0.5rem;
       transition: transform .18s ease, box-shadow .18s ease, opacity .18s ease;
-      color:#7c5cff !important;
+      color:#7c5cff;
     }
 
     .neo-btn:hover { transform: translateY(-1px); }
@@ -188,7 +188,7 @@
       <div>
         <h1 class="page-title">Edit Profile</h1>
       </div>
-      <a href="{% url 'profile' %}" class="neo-btn neo-btn-secondary">
+      <a href="{% url 'profile' %}" class="neo-btn neo-btn-secondary bg-danger text-white">
         <i class="bi bi-arrow-left"></i> Back to Profile
       </a>
     </div>
@@ -305,10 +305,10 @@
       </div>
 
       <div class="d-flex gap-2 mb-4 flex-wrap">
-        <button type="submit" class="neo-btn neo-btn-primary text-white">
+        <button type="submit" class="neo-btn neo-btn-white bg-primary text-warning">
           <i class="bi bi-check-lg"></i> Save Changes
         </button>
-        <a href="{% url 'editProfile' %}" class="neo-btn neo-btn-secondary">Cancel</a>
+        <a href="{% url 'editProfile' %}" class="neo-btn neo-btn-secondary bg-warning">Cancel</a>
       </div>
     </form>
   </div>
